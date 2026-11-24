@@ -59,6 +59,10 @@ type PublishOptions struct {
 
 	ImageRefsFile string
 
+	// SigningKey is a cosign-compatible private key path used to sign
+	// published images and their in-toto provenance attestations.
+	SigningKey string
+
 	// PreserveImportPaths preserves the full import path after KO_DOCKER_REPO.
 	PreserveImportPaths bool
 	// BaseImportPaths uses the base path without MD5 hash after KO_DOCKER_REPO.
@@ -77,6 +81,9 @@ func AddPublishArg(cmd *cobra.Command, po *PublishOptions) {
 	// See https://github.com/google/ko/pull/351 for flag discussion.
 	if dockerRepo, exists := os.LookupEnv("KO_DOCKER_REPO"); exists {
 		po.DockerRepo = dockerRepo
+	}
+	if signingKey, exists := os.LookupEnv("KO_SIGNING_KEY"); exists {
+		po.SigningKey = signingKey
 	}
 
 	cmd.Flags().StringSliceVarP(&po.Tags, "tags", "t", []string{"latest"},
@@ -97,6 +104,13 @@ func AddPublishArg(cmd *cobra.Command, po *PublishOptions) {
 
 	cmd.Flags().StringVar(&po.ImageRefsFile, "image-refs", "",
 		"Path to file where a list of the published image references will be written.")
+	cmd.Flags().StringVar(&po.SigningKey, "signing-key", po.SigningKey,
+		"Path to a cosign private key used to sign images and provenance attestations. "+
+			"Set COSIGN_PASSWORD if the key is encrypted. Can also be set with KO_SIGNING_KEY.")
+	cmd.Flags().StringVar(&po.SigningKey, "sign-key", po.SigningKey, "Alias for --signing-key.")
+	_ = cmd.Flags().MarkHidden("sign-key")
+	cmd.Flags().StringVar(&po.SigningKey, "sign", po.SigningKey, "Alias for --signing-key.")
+	_ = cmd.Flags().MarkHidden("sign")
 
 	cmd.Flags().BoolVarP(&po.PreserveImportPaths, "preserve-import-paths", "P", po.PreserveImportPaths,
 		"Whether to preserve the full import path after KO_DOCKER_REPO.")

@@ -115,3 +115,21 @@ func WithJobs(jobs int) Option {
 		return nil
 	}
 }
+
+// WithSigningKey configures the default publisher to sign images and
+// attestations with the given cosign-compatible key reference.
+func WithSigningKey(keyRef string) Option {
+	return func(i *defaultOpener) error {
+		i.signingKey = keyRef
+		return nil
+	}
+}
+
+// WithSigner configures the default publisher to sign images and attestations
+// with the given signer.
+func WithSigner(signer Signer) Option {
+	return func(i *defaultOpener) error {
+		i.signer = signer
+		return nil
+	}
+}

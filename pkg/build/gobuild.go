@@ -1105,7 +1105,7 @@ func (g gobuild) useDebugging(platform v1.Platform) bool {
 	return g.debug && doesPlatformSupportDebugging(platform)
 }
 
-func (g *gobuild) buildOne(ctx context.Context, refStr string, base v1.Image, platform *v1.Platform) (oci.SignedImage, error) {
+func (g *gobuild) buildOne(ctx context.Context, refStr string, baseRef name.Reference, baseDigest *v1.Hash, base v1.Image, platform *v1.Platform) (oci.SignedImage, error) {
 	if err := g.semaphore.Acquire(ctx, 1); err != nil {
 		return nil, err
 	}
@@ -1178,8 +1178,7 @@ func (g *gobuild) buildOne(ctx context.Context, refStr string, base v1.Image, pl
 		}
 	}
 
-	// Do the build into a temporary file.
-	file, err := g.build(ctx, buildContext{
+	buildCtx := buildContext{
 		creationTime: g.creationTime,
 		ip:           ref.Path(),
 		dir:          g.dir,
@@ -1187,7 +1186,10 @@ func (g *gobuild) buildOne(ctx context.Context, refStr string, base v1.Image, pl
 		flags:        flags,
 		ldflags:      ldflags,
 		platform:     *platform,
-	})
+	}
+
+	// Do the build into a temporary file.
+	file, err := g.build(ctx, buildCtx)
 	if err != nil {
 		return nil, fmt.Errorf("build: %w", err)
 	}
@@ -1371,7 +1373,14 @@ func (g *gobuild) buildOne(ctx context.Context, refStr string, base v1.Image, pl
 			return nil, err
 		}
 	}
-	return si, nil
+	provenance, err := g.imageProvenance(buildCtx, baseRef, baseDigest)
+	if err != nil {
+		return nil, err
+	}
+	return &imageWithProvenance{
+		signedImage: si,
+		provenance:  provenance,
+	}, nil
 }
 
 // layerOptions captures additional options to apply when authoring layer
@@ -1431,11 +1440,13 @@ func (g *gobuild) Build(ctx context.Context, s string) (Result, error) {
 	// Annotate the base image we pass to the build function with
 	// annotations indicating the digest (and possibly tag) of the
 	// base image.  This will be inherited by the image produced.
+	var baseImageDigest *v1.Hash
 	if mt != types.DockerManifestList {
 		baseDigest, err := base.Digest()
 		if err != nil {
 			return nil, err
 		}
+		baseImageDigest = &baseDigest
 
 		annotations := maps.Clone(g.annotations)
 		annotations[specsv1.AnnotationBaseImageDigest] = baseDigest.String()
@@ -1455,7 +1466,7 @@ func (g *gobuild) Build(ctx context.Context, s string) (Result, error) {
 		if !ok {
 			return nil, fmt.Errorf("failed to interpret base as image: %v", base)
 		}
-		return g.buildOne(ctx, s, baseImage, nil)
+		return g.buildOne(ctx, s, baseRef, baseImageDigest, baseImage, nil)
 	default:
 		return nil, fmt.Errorf("base image media type: %s", mt)
 	}
@@ -1495,7 +1506,7 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 		annotations[specsv1.AnnotationBaseImageDigest] = matches[0].Digest.String()
 		annotations[specsv1.AnnotationBaseImageName] = baseRef.Name()
 		img = mutate.Annotations(img, annotations).(v1.Image)
-		return g.buildOne(ctx, ref, img, matches[0].Platform)
+		return g.buildOne(ctx, ref, baseRef, &matches[0].Digest, img, matches[0].Platform)
 	}
 
 	annotations := maps.Clone(g.annotations)
@@ -1508,6 +1519,8 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 	// preserve the base image ordering here.
 	errg, gctx := errgroup.WithContext(ctx)
 	adds := make([]ocimutate.IndexAddendum, len(matches))
+	childProvenance := make(map[v1.Hash]*Provenance, len(matches))
+	orderedProvenance := make([]*Provenance, len(matches))
 	for i, desc := range matches {
 		errg.Go(func() error {
 			baseImage, err := baseIndex.Image(desc.Digest)
@@ -1538,9 +1551,18 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 
 			baseImage = mutate.Annotations(baseImage, annotations).(v1.Image)
 
-			img, err := g.buildOne(gctx, ref, baseImage, desc.Platform)
+			img, err := g.buildOne(gctx, ref, baseRef, &desc.Digest, baseImage, desc.Platform)
 			if err != nil {
 				return err
+			}
+			if pr, ok := img.(ProvenanceResult); ok {
+				provenance, err := pr.Provenance()
+				if err != nil {
+					return err
+				}
+				if provenance != nil {
+					orderedProvenance[i] = provenance
+				}
 			}
 			adds[i] = ocimutate.IndexAddendum{
 				Add: img,
@@ -1556,6 +1578,16 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 	}
 	if err := errg.Wait(); err != nil {
 		return nil, err
+	}
+	for i, add := range adds {
+		if orderedProvenance[i] == nil {
+			continue
+		}
+		h, err := add.Add.Digest()
+		if err != nil {
+			return nil, err
+		}
+		childProvenance[h] = orderedProvenance[i]
 	}
 
 	baseType, err := baseIndex.MediaType()
@@ -1588,7 +1620,21 @@ func (g *gobuild) buildAll(ctx context.Context, ref string, baseRef name.Referen
 		}
 	}
 
-	return idx, nil
+	platforms := make([]string, 0, len(matches))
+	for _, desc := range matches {
+		if desc.Platform != nil {
+			platforms = append(platforms, desc.Platform.String())
+		}
+	}
+	provenance, err := indexProvenance(ref, platforms, orderedProvenance)
+	if err != nil {
+		return nil, err
+	}
+	return &indexWithProvenance{
+		signedImageIndex: idx,
+		provenance:       provenance,
+		children:         childProvenance,
+	}, nil
 }
 
 func parseSpec(spec []string) (*platformMatcher, error) {

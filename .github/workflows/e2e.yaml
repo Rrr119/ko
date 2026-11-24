@@ -96,3 +96,52 @@ jobs:
           # Check that --debug adds dlv to the image, and that dlv is runnable.
           docker run --entrypoint="dlv" $(go run ./ build ./test/ --platform=${PLATFORM} --debug) version | grep "Delve Debugger"
         fi
+
+  signing:
+    name: signing e2e
+    runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
+    env:
+      KO_DOCKER_REPO: localhost:1338
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+      with:
+        go-version: 'stable'
+
+    - uses: chainguard-dev/actions/setup-registry@main
+    - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+    - name: Build, sign, and verify provenance
+      env:
+        COSIGN_PASSWORD: ko-e2e-password
+      run: |
+        set -euo pipefail
+
+        cosign generate-key-pair
+        img=$(go run ./ build --signing-key=cosign.key --preserve-import-paths --tags=e2e \
+          --ldflags="-X=main.version=e2e" ./test)
+        echo "built ${img}"
+
+        cosign verify --key cosign.pub --insecure-ignore-tlog \
+          --allow-http-registry --allow-insecure-registry "${img}"
+
+        cosign verify-attestation --key cosign.pub --insecure-ignore-tlog \
+          --allow-http-registry --allow-insecure-registry \
+          --type slsaprovenance1 "${img}" | tee attestations.json
+
+        jq -e -s '
+          map(select(type == "object" and .payload != null))[0]
+          | .payload | @base64d | fromjson
+          | .predicate.buildDefinition.externalParameters
+          | select(.importPath == "github.com/google/ko/test")
+          | select(.platform | startswith("linux/"))
+          | select(any(.ldflags[]?; . == "-X=main.version=e2e"))
+        ' attestations.json > /dev/null

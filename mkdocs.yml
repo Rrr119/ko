@@ -40,6 +40,7 @@ nav:
   - Features:
     - features/multi-platform.md
     - features/sboms.md
+    - features/signing.md
     - features/k8s.md
     - features/static-assets.md
     - features/build-cache.md

@@ -239,7 +239,7 @@ func makePublisher(po *options.PublishOptions) (publish.Interface, error) {
 			userAgent = po.UserAgent
 		}
 		if po.Push {
-			dp, err := publish.NewDefault(repoName,
+			opts := []publish.Option{
 				publish.WithUserAgent(userAgent),
 				publish.WithAuthFromKeychain(keychain),
 				publish.WithNamer(namer),
@@ -247,7 +247,11 @@ func makePublisher(po *options.PublishOptions) (publish.Interface, error) {
 				publish.WithTagOnly(po.TagOnly),
 				publish.Insecure(po.InsecureRegistry),
 				publish.WithJobs(po.Jobs),
-			)
+			}
+			if po.SigningKey != "" {
+				opts = append(opts, publish.WithSigningKey(po.SigningKey))
+			}
+			dp, err := publish.NewDefault(repoName, opts...)
 			if err != nil {
 				return nil, err
 			}

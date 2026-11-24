@@ -23,6 +23,7 @@ import (
 	"path"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/google/go-containerregistry/pkg/authn"
 	"github.com/google/go-containerregistry/pkg/name"
@@ -31,6 +32,7 @@ import (
 	"github.com/google/go-containerregistry/pkg/v1/types"
 	"github.com/sigstore/cosign/v3/pkg/oci"
 	ociremote "github.com/sigstore/cosign/v3/pkg/oci/remote"
+	"github.com/sigstore/cosign/v3/pkg/oci/signed"
 	"github.com/sigstore/cosign/v3/pkg/oci/walk"
 	"golang.org/x/sync/errgroup"
 
@@ -48,22 +50,26 @@ type defalt struct {
 
 	pusher *remote.Pusher
 	oopt   []ociremote.Option
+	signer Signer
+	signMu sync.Mutex
 }
 
 // Option is a functional option for NewDefault.
 type Option func(*defaultOpener) error
 
 type defaultOpener struct {
-	base      string
-	t         http.RoundTripper
-	userAgent string
-	keychain  authn.Keychain
-	namer     Namer
-	tags      []string
-	tagOnly   bool
-	insecure  bool
-	ropt      []remote.Option
-	jobs      int
+	base       string
+	t          http.RoundTripper
+	userAgent  string
+	keychain   authn.Keychain
+	namer      Namer
+	tags       []string
+	tagOnly    bool
+	insecure   bool
+	ropt       []remote.Option
+	jobs       int
+	signingKey string
+	signer     Signer
 }
 
 // Namer is a function from a supported import path to the portion of the resulting
@@ -107,6 +113,14 @@ func (do *defaultOpener) Open() (Interface, error) {
 		oopt = append(oopt, ociremote.WithTargetRepository(targetRepoOverride))
 	}
 
+	signer := do.signer
+	if signer == nil && do.signingKey != "" {
+		signer, err = signerFromKey(do.signingKey)
+		if err != nil {
+			return nil, fmt.Errorf("loading signing key %q: %w", do.signingKey, err)
+		}
+	}
+
 	return &defalt{
 		base:     do.base,
 		namer:    do.namer,
@@ -116,6 +130,7 @@ func (do *defaultOpener) Open() (Interface, error) {
 		jobs:     do.jobs,
 		pusher:   pusher,
 		oopt:     oopt,
+		signer:   signer,
 	}, nil
 }
 
@@ -166,6 +181,12 @@ func (d *defalt) pushResult(ctx context.Context, tag name.Tag, br build.Result) 
 			return err
 		}
 
+		if d.signer != nil {
+			if err := d.signEntity(ctx, tag.Context(), se); err != nil {
+				return err
+			}
+		}
+
 		// TODO(mattmoor): We should have a WriteSBOM helper upstream.
 		digest := tag.Context().Digest(h.String()) // Don't *get* the tag, we know the digest
 		ref, err := ociremote.SBOMTag(digest, d.oopt...)
@@ -188,32 +209,33 @@ func (d *defalt) pushResult(ctx context.Context, tag name.Tag, br build.Result) 
 			return nil
 		})
 
-		// TODO(mattmoor): Don't enable this until we start signing or it
-		// will publish empty signatures!
-		// if err := ociremote.WriteSignatures(tag.Context(), se, oopt...); err != nil {
-		// 	return err
-		// }
-
-		// TODO(mattmoor): Are there any attestations we want to write?
-		// if err := ociremote.WriteAttestations(tag.Context(), se, oopt...); err != nil {
-		// 	return err
-		// }
-
 		return nil
 	}
 
 	switch mt {
 	case types.OCIImageIndex, types.DockerManifestList:
-		if sii, ok := br.(oci.SignedImageIndex); ok {
-			if err := walk.SignedEntity(ctx, sii, writePeripherals); err != nil {
-				return err
+		sii, ok := br.(oci.SignedImageIndex)
+		if !ok {
+			idx, ok := br.(v1.ImageIndex)
+			if !ok {
+				return fmt.Errorf("failed to interpret result as image index: %T", br)
 			}
+			sii = signed.ImageIndex(idx)
+		}
+		if err := walk.SignedEntity(ctx, sii, writePeripherals); err != nil {
+			return err
 		}
 	case types.OCIManifestSchema1, types.DockerManifestSchema2:
-		if si, ok := br.(oci.SignedImage); ok {
-			if err := writePeripherals(ctx, si); err != nil {
-				return err
+		si, ok := br.(oci.SignedImage)
+		if !ok {
+			img, ok := br.(v1.Image)
+			if !ok {
+				return fmt.Errorf("failed to interpret result as image: %T", br)
 			}
+			si = signed.Image(img)
+		}
+		if err := writePeripherals(ctx, si); err != nil {
+			return err
 		}
 	default:
 		return fmt.Errorf("result image media type: %s", mt)

@@ -1,0 +1,17 @@
+{
+  "root": "/home/dev/feedback/uid36752",
+  "B": "/home/dev/feedback/uid36752",
+  "sha": "e30e2d86a63fb24129a184ad3694c5384139239e",
+  "wslDistro": "Ubuntu-26.04",
+  "source": {
+    "owner": "ko-build",
+    "repo": "ko",
+    "sha": "e30e2d86a63fb24129a184ad3694c5384139239e"
+  },
+  "fork": {
+    "owner": "Rrr119",
+    "repo": "ko",
+    "cloneUrl": "https://github.com/Rrr119/ko.git"
+  },
+  "at": "2026-11-24T03:30:57.959Z"
+}
